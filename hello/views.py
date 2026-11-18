@@ -5,9 +5,10 @@ from django.http import HttpResponse, JsonResponse, HttpRequest
 from .models import misiones, recompensas, mision_completada, UsuarioLeafpoints, RecompensaComprada
 from django.contrib.auth.forms import UserCreationForm
 from django.contrib.auth.models import User
-from django.db import IntegrityError
+from django.db import IntegrityError, transaction
 from .forms import CustomUserCreationForm
 from django.contrib import messages
+from django.views.decorators.http import require_POST
 
 
 # Homepage
@@ -32,20 +33,32 @@ def index(request):
         return redirect('login')
 
 # Tienda
+@login_required
 def tienda(request):
     tema_activado = request.session.get('tema_activado', None)
-    productos = ['Producto 1', 'Producto 2', 'Producto 3']
     usuario = request.user  # Usuario actual
-    recompensa_id = 3  # ID fijo para esta recompensa (ajústalo si es dinámico)
-    comprada = RecompensaComprada.objects.filter(usuario=usuario, recompensa_id=recompensa_id).exists()
-    #Obtener el usuario actual
-    user = request.user
-    # Verificar si el usuario tiene un registro de leafpoints asociado
-    usuario_leafpoints = user.usuarioleafpoints
+    recompensa_tema = recompensas.objects.filter(title="Tema Acuático").first()
+    comprada = bool(
+        recompensa_tema
+        and RecompensaComprada.objects.filter(
+            usuario=usuario, recompensa=recompensa_tema, comprada=True
+        ).exists()
+    )
+    usuario_leafpoints = usuario.usuarioleafpoints
     leafpoints = usuario_leafpoints.total_leafpoints
-    return render(request, 'tienda.html', {'tema_activado': tema_activado, 'productos': productos, 'comprada': comprada, 'leafpoints':leafpoints})
+    return render(
+        request,
+        'tienda.html',
+        {
+            'tema_activado': tema_activado,
+            'recompensa_tema': recompensa_tema,
+            'comprada': comprada,
+            'leafpoints': leafpoints,
+        },
+    )
 
 # Mi cuenta
+@login_required
 def cuenta(request):
     tema_activado = request.session.get('tema_activado', False)
     #Obtener el usuario actual
@@ -112,59 +125,66 @@ def quitar_tema(request):
         del request.session['tema_activado']
     return redirect('tienda')  # Redirige a la página principal
 
+@login_required
+@require_POST
+@transaction.atomic
 def completar_mision(request, mision_id):
-    # Buscar la misión por ID
     mision = get_object_or_404(misiones, id=mision_id)
-
-    #Obtener el usuario actual
     user = request.user
-    
-    # Verificar si el usuario tiene un registro de leafpoints asociado
-    usuario_leafpoints = user.usuarioleafpoints
-    
-    mision_lista = mision_completada.objects.filter(usuario=request.user, mision=mision).first()
 
-    if not mision_lista:
-        mision_lista = mision_completada(usuario=request.user, mision=mision, completada=False)
-        mision_lista.save()
-    
+    usuario_leafpoints = UsuarioLeafpoints.objects.select_for_update().get(usuario=user)
+    mision_lista, _ = mision_completada.objects.get_or_create(
+        usuario=user,
+        mision=mision,
+        defaults={"completada": False},
+    )
+
     if not mision_lista.completada:
         mision_lista.completada = True
         mision_lista.save()
-        
-    # Sumar los leafpoints al usuario
-    usuario_leafpoints.total_leafpoints += mision.leafpoints
-    usuario_leafpoints.save()  # Guardar los cambios
+        usuario_leafpoints.total_leafpoints += mision.leafpoints
+        usuario_leafpoints.save(update_fields=["total_leafpoints"])
+        messages.success(
+            request,
+            f"¡Has completado la misión '{mision.titulo}' y ganado "
+            f"{mision.leafpoints} leafpoints!",
+        )
+    else:
+        messages.info(request, "Esta misión ya estaba completada.")
 
-    # Mostrar un mensaje de éxito
-    messages.success(request, f"¡Has completado la misión '{mision.titulo}' y ganado {mision.leafpoints} leafpoints!")
+    return redirect('index')
 
-    # Redirigir de vuelta al listado de misiones
-    return redirect('index')  # O la URL que prefieras
-
+@login_required
+@require_POST
+@transaction.atomic
 def canjear_recompensa(request, recompensa_id):
-    # Obtener la recompensa
     recompensa = get_object_or_404(recompensas, id=recompensa_id)
     usuario = request.user
-    
-    #Obtener el usuario actual
-    user = request.user
-    
-    # Verificar si el usuario tiene un registro de leafpoints asociado
-    usuario_leafpoints = user.usuarioleafpoints
-    
-    if usuario_leafpoints.total_leafpoints >= recompensa.costo_lp:
-        # Descontar los LeafPoints del usuario
-        usuario_leafpoints.total_leafpoints -= recompensa.costo_lp
-        usuario_leafpoints.save()
 
-        # Registrar el canje en RecompensaComprada
-        RecompensaComprada.objects.create(
-            usuario=usuario,
-            recompensa=recompensa,
-            comprada=True
-        )
-        
+    usuario_leafpoints = UsuarioLeafpoints.objects.select_for_update().get(
+        usuario=usuario
+    )
+    compra_existente = RecompensaComprada.objects.filter(
+        usuario=usuario, recompensa=recompensa
+    ).first()
+    if compra_existente and compra_existente.comprada:
+        messages.info(request, "Ya canjeaste esta recompensa.")
+    elif usuario_leafpoints.total_leafpoints < recompensa.costo_lp:
+        messages.error(request, "No tienes suficientes leafpoints para este canje.")
+    else:
+        if compra_existente:
+            compra_existente.comprada = True
+            compra_existente.save(update_fields=["comprada"])
+        else:
+            RecompensaComprada.objects.create(
+                usuario=usuario,
+                recompensa=recompensa,
+                comprada=True,
+            )
+        usuario_leafpoints.total_leafpoints -= recompensa.costo_lp
+        usuario_leafpoints.save(update_fields=["total_leafpoints"])
+        messages.success(request, f"Canjeaste {recompensa.title}.")
+
     return redirect('tienda')
     
 

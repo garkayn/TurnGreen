@@ -61,12 +61,14 @@
                 <a href="{% url 'activar_tema_a' %}">
                     <button>Activar</button>
                 </a>
-            {% else %}
-                <form method="post" action="{% url 'canjear_recompensa' 3 %}">
+            {% elif recompensa_tema %}
+                <form method="post" action="{% url 'canjear_recompensa' recompensa_tema.id %}">
                     {% csrf_token %}
-                <button id="compraragua">70 LP</button>
+                    <button id="compraragua">{{ recompensa_tema.costo_lp }} LP</button>
+                </form>
+            {% else %}
+                <p>Configura la recompensa “Tema Acuático” desde el panel de administración para habilitar el canje.</p>
             {% endif %}
-            </form>
         </div>
         <div class="container">
             <h3>🌃Tema Oscuro🌃</h3>
